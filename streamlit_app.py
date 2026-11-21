@@ -21,6 +21,8 @@ from src.config import (
     EMPTY_INPUT_WARNING,
     HIGH_RISK_CONSERVATIVE_THRESHOLD,
     OTC_RECOMMENDATION_NOTICE,
+    PILL_COLOR_OPTIONS,
+    PILL_SHAPE_OPTIONS,
     SAMPLES_DIR,
     SUPPORTED_FORMATS_TEXT,
     get_otc_examples,
@@ -30,7 +32,11 @@ from src.dataset import (
     generate_mvp_pill_dataset,
     validate_and_decode_bytes,
 )
-from src.inference import DopingPredictor, PredictionResult
+from src.inference import (
+    DopingPredictor,
+    PredictionResult,
+    render_similar_pills_card_html,
+)
 
 SAMPLE_MAP = {
     "high_risk": ("sample_high_risk.png", SAMPLES_DIR / "sample_high_risk.png"),
@@ -396,7 +402,13 @@ def render_alt_card_html(result: Optional[PredictionResult]) -> str:
 def _run_inference(raw_bytes: bytes, filename: str) -> Optional[PredictionResult]:
     try:
         predictor = get_predictor()
-        return predictor.predict_from_bytes(raw_bytes=raw_bytes, filename=filename)
+        return predictor.predict_from_bytes(
+            raw_bytes=raw_bytes,
+            filename=filename,
+            imprint_query=str(st.session_state.get("imprint_filter", "") or ""),
+            color_filter=str(st.session_state.get("color_filter", "전체") or "전체"),
+            shape_filter=str(st.session_state.get("shape_filter", "전체") or "전체"),
+        )
     except InvalidImageFormatError as exc:
         st.session_state["warning_msg"] = str(exc)
         return None
@@ -519,8 +531,23 @@ def main() -> None:
             st.session_state["file_status"] = "선택된 파일 없음"
             st.session_state["warning_msg"] = ""
             st.session_state["result"] = None
+            st.session_state["imprint_filter"] = ""
+            st.session_state["color_filter"] = "전체"
+            st.session_state["shape_filter"] = "전체"
             st.session_state["uploader_nonce"] += 1
             st.rerun()
+
+        with st.expander("선택 입력: 알약 각인 문자 / 색상 / 모양 교차 확인", expanded=False):
+            st.text_input(
+                "표면 각인 문자 (예: TY 500, PSE, YH)",
+                key="imprint_filter",
+                placeholder="예: TY 500",
+            )
+            f_col1, f_col2 = st.columns(2)
+            with f_col1:
+                st.selectbox("색상", PILL_COLOR_OPTIONS, key="color_filter")
+            with f_col2:
+                st.selectbox("모양", PILL_SHAPE_OPTIONS, key="shape_filter")
 
     with right_col:
         st.markdown("<div class='nike-step-label'>02. SCREENING RESULT</div>", unsafe_allow_html=True)
@@ -541,6 +568,10 @@ def main() -> None:
             else:
                 st.caption("분석 실행 시 모델이 주목한 각인·분할선·제형 윤곽 히트맵이 표시됩니다.")
 
+        st.markdown(
+            render_similar_pills_card_html(result.similar_pills if result else None),
+            unsafe_allow_html=True,
+        )
         st.markdown(render_alt_card_html(result), unsafe_allow_html=True)
 
         st.markdown(

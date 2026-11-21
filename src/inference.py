@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import csv
+import html
+import json
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from src.config import (
     CLASS_META,
     CLASS_NAMES,
+    DEFAULT_PILL_INDEX_PATH,
+    DEFAULT_PILL_META_PATH,
     DEFAULT_WEIGHTS_PATH,
     DISCLAIMER_TEXT,
+    GENERIC_CROSSCHECK_NOTICE,
     HIGH_RISK_CONSERVATIVE_THRESHOLD,
     MAPPED_PILL_CSV_PATH,
     resolve_wada_alternative_entry,
@@ -269,6 +275,137 @@ class PredictionResult:
     matched_item_name: str = ""
     pill_focus_pct: float = 100.0
     low_quality_warning: str = ""
+    similar_pills: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def _normalize_imprint(text: str) -> str:
+    """Normalize pill imprint text by removing separators/score words and uppercasing."""
+    cleaned = (text or "").replace("분할선", " ")
+    return re.sub(r"[^A-Za-z0-9가-힣]", "", cleaned).upper()
+
+
+def _score_imprint_match(query: str, print_front: str, print_back: str) -> float:
+    """Return metadata boost score for matching front/back pill imprint."""
+    norm_q = _normalize_imprint(query)
+    if not norm_q:
+        return 0.0
+
+    norm_f = _normalize_imprint(print_front)
+    norm_b = _normalize_imprint(print_back)
+    combined = f"{norm_f}{norm_b}"
+    if not combined:
+        return 0.0
+
+    if norm_q in (norm_f, norm_b, combined):
+        return 0.35
+
+    tokens = [_normalize_imprint(t) for t in re.split(r"[\s,/+|-]+", query) if _normalize_imprint(t)]
+    if norm_q in combined or (tokens and all(tok in combined for tok in tokens)):
+        return 0.25
+    if tokens and any(tok in combined for tok in tokens):
+        return 0.12
+    return 0.0
+
+
+def load_pill_reference_index(
+    index_path: Path | str = DEFAULT_PILL_INDEX_PATH,
+    meta_path: Path | str = DEFAULT_PILL_META_PATH,
+) -> Tuple[Optional[np.ndarray], List[Dict[str, Any]]]:
+    """Load L2-normalized reference embeddings and metadata JSON if available."""
+    idx_file = Path(index_path)
+    meta_file = Path(meta_path)
+    if not idx_file.exists() or not meta_file.exists():
+        return None, []
+
+    with np.load(idx_file, allow_pickle=False) as data:
+        emb = data["embeddings"].astype(np.float32)
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-8)
+    emb = emb / norms
+    metadata = json.loads(meta_file.read_text(encoding="utf-8"))
+    if len(metadata) != len(emb):
+        return None, []
+    return emb, metadata
+
+
+def match_similar_pills(
+    query_embedding: np.ndarray,
+    ref_embeddings: Optional[np.ndarray],
+    ref_metadata: List[Dict[str, Any]],
+    imprint_query: str = "",
+    color_filter: str = "",
+    shape_filter: str = "",
+    top_k: int = 3,
+) -> List[Dict[str, Any]]:
+    """Rank MFDS reference pills by cosine similarity plus optional imprint/color/shape boosts."""
+    if ref_embeddings is None or not ref_metadata:
+        return []
+
+    q_norm = np.linalg.norm(query_embedding)
+    if q_norm <= 1e-8:
+        return []
+    q = (query_embedding / q_norm).astype(np.float32)
+
+    base_sims = np.clip(ref_embeddings @ q, 0.0, 1.0)
+    color_q = (color_filter or "").strip()
+    shape_q = (shape_filter or "").strip()
+    imprint_q = (imprint_query or "").strip()
+    use_color = bool(color_q and color_q != "전체")
+    use_shape = bool(shape_q and shape_q != "전체")
+    use_imprint = bool(imprint_q)
+
+    boosts = np.zeros(len(ref_metadata), dtype=np.float32)
+    match_flags: List[List[str]] = [[] for _ in range(len(ref_metadata))]
+
+    if use_color or use_shape or use_imprint:
+        for i, item in enumerate(ref_metadata):
+            flags: List[str] = []
+            b = 0.0
+            if use_imprint:
+                imp_boost = _score_imprint_match(
+                    imprint_q,
+                    str(item.get("print_front", "")),
+                    str(item.get("print_back", "")),
+                )
+                if imp_boost > 0.0:
+                    b += imp_boost
+                    flags.append("각인 일치")
+            if use_color and color_q in str(item.get("color", "")):
+                b += 0.12
+                flags.append("색상 일치")
+            if use_shape and shape_q == str(item.get("shape", "")):
+                b += 0.12
+                flags.append("모양 일치")
+            boosts[i] = b
+            match_flags[i] = flags
+
+    scores = base_sims + boosts
+    top_indices = np.argsort(-scores)[:top_k]
+
+    results: List[Dict[str, Any]] = []
+    for rank, idx in enumerate(top_indices, start=1):
+        i = int(idx)
+        entry = ref_metadata[i]
+        vis_pct = float(base_sims[i]) * 100.0
+        combined_pct = min(99.9, float(scores[i]) * 100.0)
+        results.append(
+            {
+                "rank": rank,
+                "item_seq": str(entry.get("item_seq", "")),
+                "item_name": str(entry.get("item_name", "")),
+                "ingredient": str(entry.get("ingredient", "")),
+                "print_front": str(entry.get("print_front", "")) or "-",
+                "print_back": str(entry.get("print_back", "")) or "-",
+                "color": str(entry.get("color", "")) or "-",
+                "shape": str(entry.get("shape", "")) or "-",
+                "risk_level": str(entry.get("risk_level", "Safe")),
+                "wada_code": str(entry.get("wada_code", "")),
+                "visual_similarity_pct": round(vis_pct, 1),
+                "similarity_pct": round(combined_pct, 1),
+                "matched_filters": match_flags[i],
+            }
+        )
+    return results
 
 
 def apply_conservative_rule(
@@ -388,6 +525,8 @@ class DopingPredictor:
         self,
         weights_path: Path | str = DEFAULT_WEIGHTS_PATH,
         device: Optional[str] = None,
+        index_path: Path | str = DEFAULT_PILL_INDEX_PATH,
+        meta_path: Path | str = DEFAULT_PILL_META_PATH,
     ) -> None:
         self.device = torch.device(
             device if device else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -399,11 +538,20 @@ class DopingPredictor:
         self.backbone = self.model_meta["backbone"]
         self.is_trained_weights = bool(self.model_meta["is_trained"])
         self.eval_transform = get_eval_transforms()
+        self.ref_embeddings, self.ref_metadata = load_pill_reference_index(
+            index_path=index_path,
+            meta_path=meta_path,
+        )
 
     def predict_from_bytes(
-        self, raw_bytes: bytes, filename: Optional[str] = None
+        self,
+        raw_bytes: bytes,
+        filename: Optional[str] = None,
+        imprint_query: str = "",
+        color_filter: str = "",
+        shape_filter: str = "",
     ) -> PredictionResult:
-        """Run validation, classification, conservative threshold check, and Grad-CAM in RAM."""
+        """Run validation, classification, conservative threshold check, Grad-CAM, and Top-3 pill matching."""
         start_time = time.perf_counter()
 
         raw_rgb_img = validate_and_decode_bytes(raw_bytes, filename=filename)
@@ -413,8 +561,11 @@ class DopingPredictor:
 
         try:
             with torch.no_grad():
-                logits = self.model(input_tensor)
+                feats = self.model.forward_features(input_tensor)
+                emb = self.model.forward_head(feats, pre_logits=True)
+                logits = self.model.get_classifier()(emb)
                 probs_tensor = torch.softmax(logits, dim=1)[0].cpu()
+                query_emb = F.normalize(emb, p=2, dim=1)[0].cpu().numpy().astype(np.float32)
 
             probs = {
                 class_name: float(probs_tensor[idx].item())
@@ -422,6 +573,15 @@ class DopingPredictor:
             }
             raw_class, final_class, escalated, escalation_reason = apply_conservative_rule(
                 probs, filename=filename
+            )
+            similar_pills = match_similar_pills(
+                query_embedding=query_emb,
+                ref_embeddings=self.ref_embeddings,
+                ref_metadata=self.ref_metadata,
+                imprint_query=imprint_query,
+                color_filter=color_filter,
+                shape_filter=shape_filter,
+                top_k=3,
             )
 
             if final_class == "Caution" and raw_class == "Safe":
@@ -471,6 +631,7 @@ class DopingPredictor:
                 matched_item_name=str(wada_rec["matched_item_name"]),
                 pill_focus_pct=pill_focus_pct,
                 low_quality_warning=low_quality_warning,
+                similar_pills=similar_pills,
             )
         finally:
             # Explicit zero-retention cleanup of image tensors and pixel arrays in RAM.
@@ -479,13 +640,106 @@ class DopingPredictor:
             del rgb_img
             del transformed
 
-    def predict_from_path(self, image_path: str | Path) -> PredictionResult:
+    def predict_from_path(
+        self,
+        image_path: str | Path,
+        imprint_query: str = "",
+        color_filter: str = "",
+        shape_filter: str = "",
+    ) -> PredictionResult:
         """Read image file into memory, run inference, and avoid keeping copies."""
         path = Path(image_path)
         if not path.exists() or not path.is_file():
             raise FileNotFoundError(f"이미지 파일을 찾을 수 없습니다: {path}")
         raw_bytes = path.read_bytes()
         try:
-            return self.predict_from_bytes(raw_bytes, filename=path.name)
+            return self.predict_from_bytes(
+                raw_bytes,
+                filename=path.name,
+                imprint_query=imprint_query,
+                color_filter=color_filter,
+                shape_filter=shape_filter,
+            )
         finally:
             del raw_bytes
+
+
+def render_similar_pills_card_html(similar_pills: Optional[List[Dict[str, Any]]]) -> str:
+    """Render shared Nike MD style HTML card for TOP 3 MFDS pill matching candidates."""
+    if not similar_pills:
+        return (
+            "<div style='background:#FFFFFF;border:1px solid #E5E5EA;padding:18px 20px;margin-top:12px;'>"
+            "<div style='font-size:0.82rem;font-weight:800;letter-spacing:0.04em;color:#111111;margin-bottom:6px;'>"
+            "🔍 AI 외형·각인 매칭 후보 (TOP 3)</div>"
+            "<div style='font-size:0.85rem;color:#52525B;line-height:1.55;'>"
+            "분석 실행 시 업로드된 알약의 특징 벡터(Embedding)와 식약처 레퍼런스 DB(2,000종)를 대조해 "
+            "가장 유사한 의약품 후보 TOP 3를 표시합니다."
+            "</div></div>"
+        )
+
+    risk_badge_map = {
+        "High Risk": ("High Risk", "#E11D48"),
+        "Caution": ("Caution", "#D97706"),
+        "Safe": ("Check Required", "#0284C7"),
+    }
+
+    rows_html = []
+    for cand in similar_pills[:3]:
+        risk_key = str(cand.get("risk_level", "Safe"))
+        risk_label, risk_color = risk_badge_map.get(risk_key, ("Check Required", "#0284C7"))
+        wada_code = str(cand.get("wada_code", "")).strip()
+        wada_pill = (
+            f"<span style='padding:2px 8px;border-radius:9999px;background:#111111;color:#FFFFFF;"
+            f"font-size:0.7rem;font-weight:700;'>{html.escape(wada_code)}</span>"
+            if wada_code
+            else ""
+        )
+        matched_tags = "".join(
+            f"<span style='padding:2px 8px;border-radius:9999px;background:#F5F5F7;border:1px solid #CACACB;"
+            f"color:#111111;font-size:0.7rem;font-weight:700;'>✓ {html.escape(str(tag))}</span>"
+            for tag in cand.get("matched_filters", [])
+        )
+        sim_pct = float(cand.get("similarity_pct", 0.0))
+        vis_pct = float(cand.get("visual_similarity_pct", sim_pct))
+        sim_detail = (
+            f"일치도 {sim_pct:.1f}% <span style='color:#707072;font-weight:500;'>(외형 {vis_pct:.1f}%)</span>"
+            if cand.get("matched_filters")
+            else f"일치도 {sim_pct:.1f}%"
+        )
+
+        rows_html.append(
+            "<div style='background:#FFFFFF;border:1px solid #E5E5EA;padding:12px 14px;margin-top:8px;'>"
+            "<div style='display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;'>"
+            "<div style='display:flex;align-items:center;gap:6px;flex-wrap:wrap;'>"
+            f"<span style='padding:2px 9px;border-radius:9999px;background:#111111;color:#FFFFFF;"
+            f"font-size:0.72rem;font-weight:800;'>TOP {int(cand.get('rank', 1))}</span>"
+            f"<span style='padding:2px 9px;border-radius:9999px;background:{risk_color};color:#FFFFFF;"
+            f"font-size:0.7rem;font-weight:800;'>{risk_label}</span>"
+            f"{wada_pill}{matched_tags}"
+            "</div>"
+            f"<span style='font-size:0.86rem;font-weight:800;color:#111111;'>{sim_detail}</span>"
+            "</div>"
+            f"<div style='margin-top:7px;font-size:0.92rem;font-weight:800;color:#111111;'>"
+            f"{html.escape(str(cand.get('item_name', '')))}</div>"
+            f"<div style='margin-top:3px;font-size:0.82rem;color:#39393B;'>"
+            f"<strong>주성분</strong>: {html.escape(str(cand.get('ingredient', '-')))}</div>"
+            f"<div style='margin-top:3px;font-size:0.8rem;color:#52525B;'>"
+            f"<strong>앞면 각인</strong>: {html.escape(str(cand.get('print_front', '-')))} · "
+            f"<strong>뒷면 각인</strong>: {html.escape(str(cand.get('print_back', '-')))} · "
+            f"<strong>색상</strong>: {html.escape(str(cand.get('color', '-')))} · "
+            f"<strong>모양</strong>: {html.escape(str(cand.get('shape', '-')))}"
+            "</div></div>"
+        )
+
+    return (
+        "<div style='background:#F5F5F7;border:1px solid #E5E5EA;padding:18px 20px;margin-top:12px;'>"
+        "<div style='display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:4px;'>"
+        "<span style='font-size:0.84rem;font-weight:800;color:#111111;'>"
+        "🔍 AI 외형·각인 매칭 후보 (TOP 3)</span>"
+        "<span style='font-size:0.72rem;font-weight:700;color:#52525B;'>식약처 레퍼런스 DB 대조</span>"
+        "</div>"
+        f"{''.join(rows_html)}"
+        "<div style='margin-top:10px;font-size:0.78rem;color:#52525B;line-height:1.5;'>"
+        f"{html.escape(GENERIC_CROSSCHECK_NOTICE)}</div>"
+        "</div>"
+    )

@@ -17,6 +17,8 @@ from src.config import (
     EMPTY_INPUT_WARNING,
     HIGH_RISK_CONSERVATIVE_THRESHOLD,
     OTC_RECOMMENDATION_NOTICE,
+    PILL_COLOR_OPTIONS,
+    PILL_SHAPE_OPTIONS,
     SAMPLES_DIR,
     SUPPORTED_FORMATS_TEXT,
     get_otc_examples,
@@ -26,7 +28,11 @@ from src.dataset import (
     generate_mvp_pill_dataset,
     validate_and_decode_bytes,
 )
-from src.inference import DopingPredictor, PredictionResult
+from src.inference import (
+    DopingPredictor,
+    PredictionResult,
+    render_similar_pills_card_html,
+)
 
 # Ensure 3 UI sample images exist on startup without regenerating full training splits.
 if not all(
@@ -646,8 +652,11 @@ def handle_sample_select(
 
 def handle_analyze(
     image_payload: Optional[dict],
-) -> Tuple[Any, str, str, Optional[Image.Image], str, str, str]:
-    """Execute zero-retention inference, Grad-CAM generation, and WADA recommendation mapping."""
+    imprint_query: str = "",
+    color_filter: str = "전체",
+    shape_filter: str = "전체",
+) -> Tuple[Any, str, str, Optional[Image.Image], str, str, str, str]:
+    """Execute zero-retention inference, Grad-CAM generation, Top-3 matching, and WADA guidance."""
     if not image_payload or not image_payload.get("bytes"):
         return (
             _render_warning_html(EMPTY_INPUT_WARNING),
@@ -655,6 +664,7 @@ def handle_analyze(
             _render_initial_probs_html(),
             None,
             "분석할 이미지가 업로드되지 않았습니다.",
+            render_similar_pills_card_html(None),
             _render_initial_alt_card_html(),
             "- 이미지를 업로드하거나 샘플 약품 칩을 선택한 뒤 **도핑 위험도 분석 실행** 버튼을 눌러 주세요.",
         )
@@ -663,6 +673,9 @@ def handle_analyze(
         result = PREDICTOR.predict_from_bytes(
             raw_bytes=image_payload["bytes"],
             filename=image_payload.get("filename"),
+            imprint_query=imprint_query or "",
+            color_filter=color_filter or "전체",
+            shape_filter=shape_filter or "전체",
         )
     except InvalidImageFormatError as exc:
         return (
@@ -671,6 +684,7 @@ def handle_analyze(
             _render_initial_probs_html(),
             None,
             "지원 이미지 형식을 확인해 주세요.",
+            render_similar_pills_card_html(None),
             _render_initial_alt_card_html(),
             f"- 지원 형식: {SUPPORTED_FORMATS_TEXT}",
         )
@@ -682,6 +696,7 @@ def handle_analyze(
         _render_probs_html(result),
         heatmap_pil,
         result.cam_explanation,
+        render_similar_pills_card_html(result.similar_pills),
         _render_alt_card_html(result),
         result.guide_text,
     )
@@ -689,11 +704,26 @@ def handle_analyze(
 
 def handle_sample_and_analyze(
     sample_key: str,
-) -> Tuple[Optional[dict], Any, str, Optional[str], Any, str, str, Optional[Image.Image], str, str, str]:
+    imprint_query: str = "",
+    color_filter: str = "전체",
+    shape_filter: str = "전체",
+) -> Tuple[Optional[dict], Any, str, Optional[str], Any, str, str, Optional[Image.Image], str, str, str, str]:
     """Load sample pill into RAM preview and immediately run analysis."""
     payload, preview_pil, status_text, _, file_reset = handle_sample_select(sample_key)
-    warn_html, badge_html, probs_html, heatmap_pil, cam_desc, alt_card_html, guide_md = handle_analyze(
-        payload
+    (
+        warn_html,
+        badge_html,
+        probs_html,
+        heatmap_pil,
+        cam_desc,
+        similar_pills_html,
+        alt_card_html,
+        guide_md,
+    ) = handle_analyze(
+        payload,
+        imprint_query=imprint_query,
+        color_filter=color_filter,
+        shape_filter=shape_filter,
     )
     return (
         payload,
@@ -705,15 +735,16 @@ def handle_sample_and_analyze(
         probs_html,
         heatmap_pil,
         cam_desc,
+        similar_pills_html,
         alt_card_html,
         guide_md,
     )
 
 
 def handle_clear() -> Tuple[
-    None, None, Any, str, Any, str, str, None, str, str, str
+    None, None, Any, str, Any, str, str, None, str, str, str, str, str, str, str
 ]:
-    """Reset all inputs, previews, warnings, and prediction outputs cleanly."""
+    """Reset all inputs, previews, warnings, filters, and prediction outputs cleanly."""
     return (
         None,  # file_input
         None,  # memory_state
@@ -724,8 +755,12 @@ def handle_clear() -> Tuple[
         _render_initial_probs_html(),  # prob_bars
         None,  # gradcam_image
         "분석 실행 시 모델이 주목한 각인·분할선·제형 윤곽 히트맵이 표시됩니다.",  # cam_desc
+        render_similar_pills_card_html(None),  # similar_pills_card
         _render_initial_alt_card_html(),  # alt_rec_card
         "- 분석 실행 후 등급별 맞춤형 복용 주의 가이드가 표시됩니다.",  # guide_md
+        "",  # imprint_input
+        "전체",  # color_input
+        "전체",  # shape_input
     )
 
 
@@ -808,6 +843,24 @@ def build_app() -> gr.Blocks:
                     elem_classes=["clear-pill-btn"],
                 )
 
+                with gr.Accordion("선택 입력: 알약 각인 문자 / 색상 / 모양 교차 확인", open=False):
+                    imprint_input = gr.Textbox(
+                        label="표면 각인 문자 (예: TY 500, PSE, YH)",
+                        placeholder="예: TY 500",
+                        value="",
+                    )
+                    with gr.Row():
+                        color_input = gr.Dropdown(
+                            label="색상",
+                            choices=PILL_COLOR_OPTIONS,
+                            value="전체",
+                        )
+                        shape_input = gr.Dropdown(
+                            label="모양",
+                            choices=PILL_SHAPE_OPTIONS,
+                            value="전체",
+                        )
+
             # Right Column: 02. Screening Result & Alternatives
             with gr.Column(scale=7, elem_classes=["nike-panel"]):
                 gr.HTML("<div class='nike-step-label'>02. SCREENING RESULT</div>")
@@ -829,6 +882,7 @@ def build_app() -> gr.Blocks:
                         elem_classes=["file-status-text"],
                     )
 
+                similar_pills_card = gr.HTML(value=render_similar_pills_card_html(None))
                 alt_rec_card = gr.HTML(value=_render_initial_alt_card_html())
 
                 with gr.Column(elem_classes=["guide-block"]):
@@ -855,8 +909,10 @@ def build_app() -> gr.Blocks:
             (btn_sample_safe, "safe"),
         ):
             btn_sample.click(
-                fn=lambda key=sample_key: handle_sample_and_analyze(key),
-                inputs=[],
+                fn=lambda imp, col, shp, key=sample_key: handle_sample_and_analyze(
+                    key, imprint_query=imp, color_filter=col, shape_filter=shp
+                ),
+                inputs=[imprint_input, color_input, shape_input],
                 outputs=[
                     memory_state,
                     preview_image,
@@ -867,6 +923,7 @@ def build_app() -> gr.Blocks:
                     prob_bars,
                     gradcam_image,
                     cam_desc,
+                    similar_pills_card,
                     alt_rec_card,
                     guide_md,
                 ],
@@ -874,13 +931,14 @@ def build_app() -> gr.Blocks:
 
         analyze_btn.click(
             fn=handle_analyze,
-            inputs=[memory_state],
+            inputs=[memory_state, imprint_input, color_input, shape_input],
             outputs=[
                 warning_banner,
                 risk_badge,
                 prob_bars,
                 gradcam_image,
                 cam_desc,
+                similar_pills_card,
                 alt_rec_card,
                 guide_md,
             ],
@@ -899,8 +957,12 @@ def build_app() -> gr.Blocks:
                 prob_bars,
                 gradcam_image,
                 cam_desc,
+                similar_pills_card,
                 alt_rec_card,
                 guide_md,
+                imprint_input,
+                color_input,
+                shape_input,
             ],
         )
 

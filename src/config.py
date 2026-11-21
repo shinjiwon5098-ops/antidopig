@@ -13,6 +13,44 @@ DATA_DIR = BASE_DIR / "data"
 SAMPLES_DIR = DATA_DIR / "samples"
 MODELS_DIR = BASE_DIR / "models"
 DEFAULT_WEIGHTS_PATH = MODELS_DIR / "best_model.pt"
+DEFAULT_PILL_INDEX_PATH = MODELS_DIR / "pill_reference_index.npz"
+DEFAULT_PILL_META_PATH = MODELS_DIR / "pill_metadata.json"
+
+PILL_COLOR_OPTIONS = [
+    "전체",
+    "하양",
+    "노랑",
+    "주황",
+    "분홍",
+    "빨강",
+    "갈색",
+    "연두",
+    "초록",
+    "파랑",
+    "보라",
+    "회색",
+    "투명",
+]
+
+PILL_SHAPE_OPTIONS = [
+    "전체",
+    "원형",
+    "타원형",
+    "장방형",
+    "사각형",
+    "삼각형",
+    "마름모형",
+    "오각형",
+    "육각형",
+    "팔각형",
+    "반원형",
+    "기타",
+]
+
+GENERIC_CROSSCHECK_NOTICE = (
+    "※ 동일 외형 복제약(제네릭)이 존재할 수 있으므로 알약 표면의 각인 문자를 "
+    "KADA 의약품 검색에서 최종 교차 확인하십시오."
+)
 
 IMAGE_SIZE = 224
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
