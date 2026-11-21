@@ -1,4 +1,6 @@
-# PyTorch & Vision Backbone
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# PyTorch & Vision Backbone (CPU wheels for lightweight cloud deployment)
 torch>=2.2.0
 torchvision>=0.17.0
 timm>=1.0.0
@@ -13,5 +15,6 @@ numpy>=1.26.0
 # Evaluation & Metrics
 scikit-learn>=1.4.0
 
-# Web UI
+# Web UI (Streamlit Cloud + Local Gradio)
+streamlit>=1.36.0
 gradio>=4.44.0
