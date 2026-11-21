@@ -129,14 +129,14 @@ def _fallback_adaptive_mask(work_rgb: np.ndarray) -> Optional[np.ndarray]:
     return _select_central_component(filled)
 
 
-def preprocess_realworld_pill(
+def _preprocess_realworld_pill_with_box(
     rgb_img: np.ndarray,
     bg_rgb: Tuple[int, int, int] = MFDS_BG_RGB,
     margin_ratio: float = 0.15,
-) -> np.ndarray:
-    """Detect central pill ROI on complex backgrounds, crop with 15% padding, and unify backdrop."""
+) -> Tuple[np.ndarray, Optional[Tuple[int, int, int, int]]]:
+    """Detect central pill ROI on complex backgrounds, returning composited image and crop box."""
     if _has_uniform_background(rgb_img):
-        return rgb_img
+        return rgb_img, None
 
     h, w = rgb_img.shape[:2]
     max_dim = max(h, w)
@@ -174,12 +174,12 @@ def preprocess_realworld_pill(
     if fg_work is None:
         fg_work = _fallback_adaptive_mask(work_rgb)
     if fg_work is None:
-        return rgb_img
+        return rgb_img, None
 
     full_mask = cv2.resize(fg_work, (w, h), interpolation=cv2.INTER_LINEAR)
     ys, xs = np.where(full_mask > 127)
     if len(xs) == 0 or len(ys) == 0:
-        return rgb_img
+        return rgb_img, None
 
     x_min, x_max = int(xs.min()), int(xs.max()) + 1
     y_min, y_max = int(ys.min()), int(ys.max()) + 1
@@ -198,6 +198,18 @@ def preprocess_realworld_pill(
     fg_crop = rgb_img[y1:y2, x1:x2].astype(np.float32)
     bg_arr = np.array(bg_rgb, dtype=np.float32)[None, None, :]
     composited = np.clip(fg_crop * alpha + bg_arr * (1.0 - alpha), 0, 255).astype(np.uint8)
+    return composited, (x1, y1, x2, y2)
+
+
+def preprocess_realworld_pill(
+    rgb_img: np.ndarray,
+    bg_rgb: Tuple[int, int, int] = MFDS_BG_RGB,
+    margin_ratio: float = 0.15,
+) -> np.ndarray:
+    """Detect central pill ROI on complex backgrounds, crop with 15% padding, and unify backdrop."""
+    composited, _ = _preprocess_realworld_pill_with_box(
+        rgb_img, bg_rgb=bg_rgb, margin_ratio=margin_ratio
+    )
     return composited
 
 
@@ -412,7 +424,7 @@ def apply_conservative_rule(
     probabilities: Dict[str, float],
     filename: Optional[str] = None,
 ) -> tuple[str, str, bool, str]:
-    """Apply conservative escalation and Caution (S6/S9) demo/tie-break rules."""
+    """Apply conservative escalation and Caution demo/tie-break rules."""
     raw_class = max(probabilities, key=probabilities.get)
     high_risk_prob = probabilities["High Risk"]
     caution_prob = probabilities["Caution"]
@@ -420,8 +432,8 @@ def apply_conservative_rule(
 
     if fname == "sample_caution.png":
         reason = (
-            "경기 기간 중 주의(S6/S9 추정) 판정: 시연 샘플(sample_caution.png) 기준에 따라 "
-            "경기 기간 중 금지 계열(S6/S9 추정)로 분류하고 허용 대체 성분을 안내합니다."
+            "경기 기간 중 주의(Caution) 판정: 시연 샘플(sample_caution.png) 기준에 따라 "
+            "Caution 등급으로 분류하고 매칭된 WADA 세부 코드 및 대체 성분을 안내합니다."
         )
         return raw_class, "Caution", True, reason
 
@@ -434,7 +446,7 @@ def apply_conservative_rule(
         reason = (
             f"경기 기간 중 주의 경합 판정: Caution 외형 유사도 점수({caution_prob * 100:.1f}%)가 "
             f"45% 이상이며 High Risk({high_risk_prob * 100:.1f}%)와 5% 이내 박빙으로 감지되어 "
-            "경기 기간 중 금지(S6/S9 추정) 등급으로 판정합니다."
+            "Caution(경기 기간 중 주의) 등급으로 판정합니다."
         )
         return raw_class, "Caution", True, reason
 
@@ -456,9 +468,31 @@ def apply_conservative_rule(
     return raw_class, raw_class, False, ""
 
 
+def _lookup_wada_code_from_similar_pills(
+    final_class: str,
+    similar_pills: Optional[List[Dict[str, Any]]],
+) -> Tuple[Optional[str], str]:
+    """Identify exact WADA code from high-confidence MFDS reference matches when filename lacks ITEM_SEQ."""
+    if not similar_pills:
+        return None, ""
+
+    for cand in similar_pills:
+        wada_raw = str(cand.get("wada_code") or "").strip()
+        if not wada_raw or str(cand.get("risk_level") or "") != final_class:
+            continue
+        vis_pct = float(cand.get("visual_similarity_pct", 0.0))
+        sim_pct = float(cand.get("similarity_pct", 0.0))
+        if vis_pct >= 75.0 or sim_pct >= 80.0:
+            primary_code = wada_raw.split(",")[0].strip()
+            if primary_code:
+                return primary_code, str(cand.get("item_name") or "")
+    return None, ""
+
+
 def build_wada_recommendation(
     final_class: str,
     filename: Optional[str] = None,
+    similar_pills: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, object]:
     """Build WADA code metadata and safe alternative/TUE guidance for High Risk and Caution."""
     if final_class not in ("High Risk", "Caution"):
@@ -475,30 +509,18 @@ def build_wada_recommendation(
         }
 
     detected_code, matched_item_name = _lookup_wada_code_from_filename(filename)
-    is_estimated = detected_code is None
-
-    if final_class == "Caution" and is_estimated:
-        resolved_code = "S6"
-        category_name = "흥분제 (슈도에페드린 등 감기약 성분)"
-        prohibition_scope = "경기 기간 중 금지"
-        alternatives = [
-            "해열·진통 대체 참고(허용 성분): 아세트아미노펜 단일제(예: 타이레놀 단일 성분), 이부프로펜·나프록센 등 일반 NSAIDs 단일제",
-            "비염·알레르기 대체 참고(허용 성분): 2세대 항히스타민제(세티리진, 로라타딘, 펙소페나딘 등 비졸음 항히스타민제)",
-            "복합감기약(슈도에페드린·에페드린 함유) 및 처방 진통·항염증제(S6~S9 계열) 가능성을 배제하기 위해 KADA 의약품 검색으로 최종 성분 확인",
-        ]
-        tue_notice = (
-            "경기 기간 중 금지(S6/S9 추정) 대상에 해당할 수 있습니다. "
-            "경기 기간(In-Competition) 개시 전 체내 배설 반감기를 고려해 복용을 중단하거나, "
-            "치료가 불가피한 경우 스포츠 의학 전문의 처방 변경 상담 및 TUE(치료목적사용면책) 신청 여부를 확인하십시오."
+    if detected_code is None:
+        detected_code, matched_item_name = _lookup_wada_code_from_similar_pills(
+            final_class, similar_pills
         )
-        prescription_only = False
-    else:
-        resolved_code, info = resolve_wada_alternative_entry(detected_code, final_class)
-        category_name = str(info["category_name"])
-        prohibition_scope = str(info["prohibition_scope"])
-        alternatives = list(info["alternatives"])
-        tue_notice = str(info["tue_notice"])
-        prescription_only = bool(info.get("prescription_only", False))
+
+    is_estimated = detected_code is None
+    resolved_code, info = resolve_wada_alternative_entry(detected_code, final_class)
+    category_name = str(info["category_name"])
+    prohibition_scope = str(info["prohibition_scope"])
+    alternatives = list(info["alternatives"])
+    tue_notice = str(info["tue_notice"])
+    prescription_only = bool(info.get("prescription_only", False))
 
     headline = (
         f"이 약물은 WADA 금지약물 리스트 중 [{resolved_code}: {category_name}]에 해당하는 약물로 "
@@ -555,7 +577,7 @@ class DopingPredictor:
         start_time = time.perf_counter()
 
         raw_rgb_img = validate_and_decode_bytes(raw_bytes, filename=filename)
-        rgb_img = preprocess_realworld_pill(raw_rgb_img)
+        rgb_img, crop_box = _preprocess_realworld_pill_with_box(raw_rgb_img)
         transformed = self.eval_transform(image=rgb_img)["image"]
         input_tensor = numpy_to_tensor(transformed).unsqueeze(0).to(self.device)
 
@@ -593,13 +615,16 @@ class DopingPredictor:
             heatmap_image, cam_explanation = generate_gradcam_overlay(
                 model=self.model,
                 input_tensor=input_tensor,
-                original_rgb=rgb_img,
+                original_rgb=raw_rgb_img,
                 target_class_idx=cam_target_idx,
                 backbone=self.backbone,
+                crop_box=crop_box,
             )
 
             meta = CLASS_META[final_class]
-            wada_rec = build_wada_recommendation(final_class, filename=filename)
+            wada_rec = build_wada_recommendation(
+                final_class, filename=filename, similar_pills=similar_pills
+            )
             pill_focus_pct = _extract_pill_focus_pct(cam_explanation)
             low_quality_warning = (
                 LOW_QUALITY_WARNING_TEXT if pill_focus_pct < LOW_PILL_FOCUS_THRESHOLD else ""
@@ -662,6 +687,21 @@ class DopingPredictor:
             )
         finally:
             del raw_bytes
+
+
+def format_risk_badge_label(result: PredictionResult) -> str:
+    """Format the top risk badge label with the exact matched WADA code (or estimated group)."""
+    if result.final_class == "High Risk":
+        if result.wada_code and not result.is_estimated_group:
+            return f"HIGH RISK · 복용 금지 ({result.wada_code} · {result.prohibition_scope})"
+        return f"HIGH RISK · 복용 금지 ({result.wada_code or 'S1~S5'} 추정)"
+
+    if result.final_class == "Caution":
+        if result.wada_code and not result.is_estimated_group:
+            return f"CAUTION · {result.prohibition_scope} ({result.wada_code})"
+        return f"CAUTION · 경기 기간 중 금지 ({result.wada_code or 'S6~S9'} 추정)"
+
+    return "CHECK REQUIRED · 외형 기준 금지성분 미검출 · 추가 확인 필요"
 
 
 def render_similar_pills_card_html(similar_pills: Optional[List[Dict[str, Any]]]) -> str:
@@ -742,4 +782,33 @@ def render_similar_pills_card_html(similar_pills: Optional[List[Dict[str, Any]]]
         "<div style='margin-top:10px;font-size:0.78rem;color:#52525B;line-height:1.5;'>"
         f"{html.escape(GENERIC_CROSSCHECK_NOTICE)}</div>"
         "</div>"
+    )
+
+
+def render_result_summary_html(result: PredictionResult) -> str:
+    """Render concise 1-line identified item & WADA category summary inside the top result card."""
+    parts: List[str] = []
+    if result.matched_item_name:
+        parts.append(f"식별 품목: <strong>{html.escape(result.matched_item_name)}</strong>")
+    elif result.similar_pills:
+        top1 = result.similar_pills[0]
+        top_name = str(top1.get("item_name", "")).strip()
+        top_sim = float(top1.get("similarity_pct", 0.0))
+        if top_name:
+            parts.append(f"최유사 후보: <strong>{html.escape(top_name)}</strong> ({top_sim:.1f}%)")
+
+    if result.wada_code and result.wada_category_name:
+        parts.append(
+            f"WADA 분류: <strong>[{html.escape(result.wada_code)}: {html.escape(result.wada_category_name)}]</strong>"
+        )
+    elif result.final_class == "Safe":
+        parts.append("외형 기준 금지성분 미검출 · 복용 전 KADA 의약품 검색 최종 확인 권장")
+
+    if not parts:
+        return ""
+
+    return (
+        "<div style='margin-top:10px;padding:9px 12px;background:#FFFFFF;border:1px solid #E5E5EA;"
+        "font-size:0.84rem;color:#111111;line-height:1.5;'>"
+        f"{' · '.join(parts)}</div>"
     )

@@ -35,6 +35,8 @@ from src.dataset import (
 from src.inference import (
     DopingPredictor,
     PredictionResult,
+    format_risk_badge_label,
+    render_result_summary_html,
     render_similar_pills_card_html,
 )
 
@@ -206,12 +208,13 @@ def render_badge_html(result: Optional[PredictionResult]) -> str:
             "</div></div>"
         )
 
-    badge_styles = {
-        "High Risk": ("HIGH RISK · 복용 금지", "#E11D48"),
-        "Caution": ("CAUTION · 경기 기간 중 금지(S6/S9 추정)", "#D97706"),
-        "Safe": ("CHECK REQUIRED · 외형 기준 금지성분 미검출 · 추가 확인 필요", "#0284C7"),
+    signal_colors = {
+        "High Risk": "#E11D48",
+        "Caution": "#D97706",
+        "Safe": "#0284C7",
     }
-    badge_label, signal_color = badge_styles[result.final_class]
+    badge_label = format_risk_badge_label(result)
+    signal_color = signal_colors[result.final_class]
     score_pct = result.probabilities[result.raw_class] * 100.0
 
     low_quality_html = ""
@@ -231,6 +234,8 @@ def render_badge_html(result: Optional[PredictionResult]) -> str:
             f"🛡️ {html.escape(result.escalation_reason)}</div>"
         )
 
+    summary_html = render_result_summary_html(result)
+
     return (
         "<div style='background:#F5F5F7;border:1px solid #E5E5EA;padding:18px 20px;margin-bottom:12px;'>"
         f"{low_quality_html}"
@@ -242,6 +247,7 @@ def render_badge_html(result: Optional[PredictionResult]) -> str:
         f"<span style='font-size:1.05rem;font-weight:800;color:#111111;'>외형 유사도 점수 {score_pct:.1f}%</span>"
         f"<span style='margin-left:6px;font-size:0.78rem;font-weight:500;color:#707072;'>({result.elapsed_ms:.0f}ms)</span>"
         "</div></div>"
+        f"{summary_html}"
         f"{escalation_html}"
         "</div>"
     )
@@ -325,7 +331,11 @@ def render_alt_card_html(result: Optional[PredictionResult]) -> str:
         )
 
     signal_color = "#E11D48" if result.final_class == "High Risk" else "#D97706"
-    tag_text = "추정군 매핑 (이미지 단독 추론)" if result.is_estimated_group else "WADA 코드 매핑"
+    tag_text = (
+        "추정군 매핑 (미특정)"
+        if result.is_estimated_group
+        else f"식약처 레퍼런스 매칭 · {html.escape(result.wada_code)}"
+    )
     item_line = (
         f"<div style='font-size:0.8rem;color:#52525B;margin-bottom:8px;'>식별 품목: <strong>{html.escape(result.matched_item_name)}</strong></div>"
         if result.matched_item_name
@@ -554,35 +564,40 @@ def main() -> None:
         result: Optional[PredictionResult] = st.session_state["result"]
 
         st.markdown(render_badge_html(result), unsafe_allow_html=True)
-        st.markdown(render_probs_html(result), unsafe_allow_html=True)
 
-        with st.container(border=True):
+        top3_title = "🔍 AI 외형·각인 매칭 후보 (TOP 3)"
+        if result is not None and result.similar_pills:
+            top1_name = str(result.similar_pills[0].get("item_name", "")).strip()
+            top1_sim = float(result.similar_pills[0].get("similarity_pct", 0.0))
+            if top1_name:
+                top3_title = f"🔍 AI 외형·각인 매칭 후보 (TOP 3) · 1위 {top1_name} ({top1_sim:.1f}%)"
+
+        with st.expander(top3_title, expanded=False):
             st.markdown(
-                "<div style='font-size:0.82rem;font-weight:800;letter-spacing:0.08em;color:#111111;margin-bottom:6px;'>"
-                "GRAD-CAM VISUAL EXPLANATION</div>",
+                render_similar_pills_card_html(result.similar_pills if result else None),
                 unsafe_allow_html=True,
             )
+
+        with st.expander("💊 WADA 세부 코드 · 대체 성분 및 일반의약품(OTC) 안내", expanded=False):
+            st.markdown(render_alt_card_html(result), unsafe_allow_html=True)
+
+        with st.expander("🎯 Grad-CAM 판단 근거 시각화 및 3단계 예측 확률", expanded=False):
+            st.markdown(render_probs_html(result), unsafe_allow_html=True)
             if result is not None:
-                st.image(result.heatmap_image, use_container_width=True)
+                st.image(
+                    result.heatmap_image,
+                    caption="Grad-CAM 판단 근거 히트맵 (원본 비율 유지)",
+                    use_container_width=True,
+                )
                 st.caption(result.cam_explanation)
             else:
                 st.caption("분석 실행 시 모델이 주목한 각인·분할선·제형 윤곽 히트맵이 표시됩니다.")
 
-        st.markdown(
-            render_similar_pills_card_html(result.similar_pills if result else None),
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_alt_card_html(result), unsafe_allow_html=True)
-
-        st.markdown(
-            "<div style='font-size:0.82rem;font-weight:800;letter-spacing:0.08em;color:#111111;margin:16px 0 6px 0;'>"
-            "ACTIONABLE SAFETY GUIDE</div>",
-            unsafe_allow_html=True,
-        )
-        if result is not None:
-            st.markdown(result.guide_text)
-        else:
-            st.markdown("- 분석 실행 후 등급별 맞춤형 복용 주의 가이드가 표시됩니다.")
+        with st.expander("📋 등급별 맞춤형 복용 주의 가이드", expanded=False):
+            if result is not None:
+                st.markdown(result.guide_text)
+            else:
+                st.markdown("- 분석 실행 후 등급별 맞춤형 복용 주의 가이드가 표시됩니다.")
 
     st.markdown(
         f"<footer class='disclaimer-footnote'><strong>[면책 및 교차 확인 필수]</strong> {html.escape(DISCLAIMER_TEXT)}</footer>",

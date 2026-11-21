@@ -31,6 +31,8 @@ from src.dataset import (
 from src.inference import (
     DopingPredictor,
     PredictionResult,
+    format_risk_badge_label,
+    render_result_summary_html,
     render_similar_pills_card_html,
 )
 
@@ -243,6 +245,15 @@ body, .gradio-container {
     border-radius: 0 !important;
     box-shadow: none !important;
 }
+.preview-box img,
+.gradcam-frame img {
+    object-fit: contain !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: 100% !important;
+    max-height: 280px !important;
+    margin: 0 auto !important;
+}
 
 /* Sample Chips */
 .sample-heading {
@@ -429,12 +440,13 @@ def _render_initial_alt_card_html() -> str:
 
 
 def _render_result_badge_html(result: PredictionResult) -> str:
-    badge_styles = {
-        "High Risk": ("HIGH RISK · 복용 금지", "#E11D48"),
-        "Caution": ("CAUTION · 경기 기간 중 금지(S6/S9 추정)", "#D97706"),
-        "Safe": ("CHECK REQUIRED · 외형 기준 금지성분 미검출 · 추가 확인 필요", "#0284C7"),
+    signal_colors = {
+        "High Risk": "#E11D48",
+        "Caution": "#D97706",
+        "Safe": "#0284C7",
     }
-    badge_label, signal_color = badge_styles[result.final_class]
+    badge_label = format_risk_badge_label(result)
+    signal_color = signal_colors[result.final_class]
     score_pct = result.probabilities[result.raw_class] * 100.0
 
     low_quality_html = ""
@@ -454,6 +466,8 @@ def _render_result_badge_html(result: PredictionResult) -> str:
             f"🛡️ {html.escape(result.escalation_reason)}</div>"
         )
 
+    summary_html = render_result_summary_html(result)
+
     return (
         "<div style='background:#F5F5F7;border:1px solid #E5E5EA;padding:18px 20px;'>"
         f"{low_quality_html}"
@@ -465,6 +479,7 @@ def _render_result_badge_html(result: PredictionResult) -> str:
         f"<span style='font-size:1.05rem;font-weight:800;color:#111111;'>외형 유사도 점수 {score_pct:.1f}%</span>"
         f"<span style='margin-left:6px;font-size:0.78rem;font-weight:500;color:#707072;'>({result.elapsed_ms:.0f}ms)</span>"
         "</div></div>"
+        f"{summary_html}"
         f"{escalation_html}"
         "</div>"
     )
@@ -515,7 +530,11 @@ def _render_alt_card_html(result: PredictionResult) -> str:
         )
 
     signal_color = "#E11D48" if result.final_class == "High Risk" else "#D97706"
-    tag_text = "추정군 매핑 (이미지 단독 추론)" if result.is_estimated_group else "WADA 코드 매핑"
+    tag_text = (
+        "추정군 매핑 (미특정)"
+        if result.is_estimated_group
+        else f"식약처 레퍼런스 매칭 · {html.escape(result.wada_code)}"
+    )
     item_line = (
         f"<div style='font-size:0.8rem;color:#52525B;margin-bottom:8px;'>식별 품목: <strong>{html.escape(result.matched_item_name)}</strong></div>"
         if result.matched_item_name
@@ -866,27 +885,29 @@ def build_app() -> gr.Blocks:
                 gr.HTML("<div class='nike-step-label'>02. SCREENING RESULT</div>")
 
                 risk_badge = gr.HTML(value=_render_initial_badge_html())
-                prob_bars = gr.HTML(value=_render_initial_probs_html())
 
-                with gr.Column(elem_classes=["gradcam-card"]):
-                    gr.HTML("<div class='gradcam-card-title'>GRAD-CAM VISUAL EXPLANATION</div>")
-                    gradcam_image = gr.Image(
-                        show_label=False,
-                        type="pil",
-                        interactive=False,
-                        height=230,
-                        elem_classes=["gradcam-frame"],
-                    )
-                    cam_desc = gr.Markdown(
-                        "분석 실행 시 모델이 주목한 각인·분할선·제형 윤곽 히트맵이 표시됩니다.",
-                        elem_classes=["file-status-text"],
-                    )
+                with gr.Accordion("🔍 AI 외형·각인 매칭 후보 (TOP 3)", open=False):
+                    similar_pills_card = gr.HTML(value=render_similar_pills_card_html(None))
 
-                similar_pills_card = gr.HTML(value=render_similar_pills_card_html(None))
-                alt_rec_card = gr.HTML(value=_render_initial_alt_card_html())
+                with gr.Accordion("💊 WADA 세부 코드 · 대체 성분 및 일반의약품(OTC) 안내", open=False):
+                    alt_rec_card = gr.HTML(value=_render_initial_alt_card_html())
 
-                with gr.Column(elem_classes=["guide-block"]):
-                    gr.HTML("<div class='guide-heading'>ACTIONABLE SAFETY GUIDE</div>")
+                with gr.Accordion("🎯 Grad-CAM 판단 근거 시각화 및 3단계 예측 확률", open=False):
+                    prob_bars = gr.HTML(value=_render_initial_probs_html())
+                    with gr.Column(elem_classes=["gradcam-card"]):
+                        gr.HTML("<div class='gradcam-card-title'>GRAD-CAM VISUAL EXPLANATION</div>")
+                        gradcam_image = gr.Image(
+                            show_label=False,
+                            type="pil",
+                            interactive=False,
+                            elem_classes=["gradcam-frame"],
+                        )
+                        cam_desc = gr.Markdown(
+                            "분석 실행 시 모델이 주목한 각인·분할선·제형 윤곽 히트맵이 표시됩니다.",
+                            elem_classes=["file-status-text"],
+                        )
+
+                with gr.Accordion("📋 등급별 맞춤형 복용 주의 가이드", open=False):
                     guide_md = gr.Markdown(
                         "- 분석 실행 후 등급별 맞춤형 복용 주의 가이드가 표시됩니다.",
                         elem_classes=["guide-body"],

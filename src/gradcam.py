@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -52,11 +52,11 @@ def generate_gradcam_overlay(
     target_class_idx: int,
     backbone: str = "efficientnet_b0",
     image_size: int = IMAGE_SIZE,
+    crop_box: Optional[Tuple[int, int, int, int]] = None,
+    max_display_side: int = 800,
 ) -> Tuple[np.ndarray, str]:
-    """Compute Grad-CAM heatmap on the final conv layer and overlay on 224x224 RGB image."""
+    """Compute Grad-CAM on input_tensor and overlay onto original_rgb preserving aspect ratio."""
     target_layer = get_gradcam_target_layer(model, backbone=backbone)
-    resized_rgb = cv2.resize(original_rgb, (image_size, image_size), interpolation=cv2.INTER_AREA)
-    rgb_float = np.float32(resized_rgb) / 255.0
 
     # Ensure gradients are enabled for Grad-CAM even inside inference helpers.
     with torch.enable_grad():
@@ -64,6 +64,31 @@ def generate_gradcam_overlay(
             targets = [ClassifierOutputTarget(target_class_idx)]
             grayscale_cam = cam(input_tensor=input_tensor, targets=targets)[0]
 
-    overlay = show_cam_on_image(rgb_float, grayscale_cam, use_rgb=True, image_weight=0.55)
+    orig_h, orig_w = original_rgb.shape[:2]
+    max_dim = max(orig_h, orig_w)
+    scale = min(1.0, float(max_display_side) / float(max_dim)) if max_dim > 0 else 1.0
+    disp_w = max(1, int(round(orig_w * scale)))
+    disp_h = max(1, int(round(orig_h * scale)))
+
+    if (disp_w, disp_h) != (orig_w, orig_h):
+        disp_rgb = cv2.resize(original_rgb, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+    else:
+        disp_rgb = original_rgb
+
+    if crop_box is None:
+        cam_display = cv2.resize(grayscale_cam, (disp_w, disp_h), interpolation=cv2.INTER_CUBIC)
+    else:
+        x1, y1, x2, y2 = crop_box
+        dx1 = max(0, min(disp_w - 1, int(round(x1 * disp_w / max(1, orig_w)))))
+        dy1 = max(0, min(disp_h - 1, int(round(y1 * disp_h / max(1, orig_h)))))
+        dx2 = max(dx1 + 1, min(disp_w, int(round(x2 * disp_w / max(1, orig_w)))))
+        dy2 = max(dy1 + 1, min(disp_h, int(round(y2 * disp_h / max(1, orig_h)))))
+        cam_display = np.zeros((disp_h, disp_w), dtype=np.float32)
+        cam_crop = cv2.resize(grayscale_cam, (dx2 - dx1, dy2 - dy1), interpolation=cv2.INTER_CUBIC)
+        cam_display[dy1:dy2, dx1:dx2] = cam_crop
+
+    cam_display = np.clip(cam_display, 0.0, 1.0)
+    rgb_float = np.float32(disp_rgb) / 255.0
+    overlay = show_cam_on_image(rgb_float, cam_display, use_rgb=True, image_weight=0.55)
     explanation = _describe_activation(grayscale_cam)
     return overlay, explanation
