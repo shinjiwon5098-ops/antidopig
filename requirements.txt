@@ -1,0 +1,17 @@
+# PyTorch & Vision Backbone
+torch>=2.2.0
+torchvision>=0.17.0
+timm>=1.0.0
+
+# Preprocessing & Explainability (XAI)
+albumentations>=1.4.0
+grad-cam>=1.5.0
+opencv-python-headless>=4.9.0
+pillow>=10.0.0
+numpy>=1.26.0
+
+# Evaluation & Metrics
+scikit-learn>=1.4.0
+
+# Web UI
+gradio>=4.44.0

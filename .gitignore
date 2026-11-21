@@ -1,0 +1,19 @@
+# Virtual environments
+.venv/
+venv/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Scratch / OS metadata
+scratch/
+.DS_Store
+Thumbs.db
+
+# Exclude full dataset while keeping UI sample images
+data/*
+!data/samples/
+pill_images/
