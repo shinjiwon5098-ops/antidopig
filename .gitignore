@@ -17,3 +17,7 @@ Thumbs.db
 data/*
 !data/samples/
 pill_images/
+
+# Large media / archive files
+*.mp4
+*.tar

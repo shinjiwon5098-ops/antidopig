@@ -107,6 +107,11 @@ CLASS_META = {
     },
 }
 
+OTC_RECOMMENDATION_NOTICE = (
+    "※ 제시된 일반의약품은 동일 효능군 내 WADA 허용 단일성분 참고 예시이며, "
+    "구매 시 약사 및 KADA 의약품 검색으로 최종 확인하십시오."
+)
+
 # WADA Prohibited List detail mapping (S0~S9, P1 + estimated fallback groups)
 WADA_CODE_ALTERNATIVES: Dict[str, Dict[str, object]] = {
     "S0": {
@@ -262,6 +267,17 @@ WADA_CODE_ALTERNATIVES: Dict[str, Dict[str, object]] = {
             "콧물·재채기·비염: 2세대 항히스타민제(세티리진, 로라타딘, 펙소페나딘 등) 및 생리식염수 비강 세척",
             "기침·가래: 덱스트로메토르판·아세틸시스테인·암브록솔 등 비금지 단일 성분 (KADA 의약품 검색 재확인 권장)",
         ],
+        "otc_examples": [
+            {
+                "label": "S6(감기·코막힘)",
+                "ingredients": ["아세트아미노펜", "세티리진", "로라타딘"],
+                "products": [
+                    "타이레놀정 500mg(한국얀센)",
+                    "지르텍정(한국유씨비)",
+                    "클라리틴정(바이엘)",
+                ],
+            },
+        ],
     },
     "S6.A": {
         "category_name": "비지정 흥분제 (Stimulants)",
@@ -282,6 +298,17 @@ WADA_CODE_ALTERNATIVES: Dict[str, Dict[str, object]] = {
             "코막힘·비염 완화: 2세대 항히스타민제(로라타딘, 세티리진, 펙소페나딘), 옥시메타졸린 등 허용 국소 점비제 여부 KADA 확인",
             "생약·한방 감기약(마황=에페드린 함유) 및 복합 감기약 복용 전 성분표 교차 확인 필수",
         ],
+        "otc_examples": [
+            {
+                "label": "S6(감기·코막힘)",
+                "ingredients": ["아세트아미노펜", "세티리진", "로라타딘"],
+                "products": [
+                    "타이레놀정 500mg(한국얀센)",
+                    "지르텍정(한국유씨비)",
+                    "클라리틴정(바이엘)",
+                ],
+            },
+        ],
     },
     "S7": {
         "category_name": "마약류 진통제 (Narcotics · 트라마돌 포함)",
@@ -291,6 +318,16 @@ WADA_CODE_ALTERNATIVES: Dict[str, Dict[str, object]] = {
         "alternatives": [
             "경증·중등도 통증 대체 참고: 아세트아미노펜 단일제, 이부프로펜·나프록센·셀레콕시브 등 일반 비마약성 소염진통제(NSAIDs)",
             "수술·중증 통증으로 처방된 경우 임의 변경 불가 — 주치의와 허용 진통제 전환 상담 및 필요 시 TUE 신청 필수",
+        ],
+        "otc_examples": [
+            {
+                "label": "S7(통증·소염)",
+                "ingredients": ["이부프로펜", "덱시부프로펜", "나프록센"],
+                "products": [
+                    "애드빌정(화이자)",
+                    "탁센연질캡슐(GC녹십자)",
+                ],
+            },
         ],
     },
     "S8": {
@@ -312,6 +349,16 @@ WADA_CODE_ALTERNATIVES: Dict[str, Dict[str, object]] = {
             "알레르기·두드러기 참고: 2세대 항히스타민제(세티리진, 로라타딘, 펙소페나딘 등 경구제)",
             "근골격계 통증·염증 참고: 아세트아미노펜 단일제, 경구/외용 NSAIDs(이부프로펜, 디클로페낙 겔 등)",
             "피부·비강 등 국소 외용제(연고·점안액·비강분무제)는 허용 경로이나, 전신 스테로이드 처방 시 반드시 전문의 상담 및 TUE 신청 필수",
+        ],
+        "otc_examples": [
+            {
+                "label": "S9(통증·소염)",
+                "ingredients": ["이부프로펜", "덱시부프로펜", "나프록센"],
+                "products": [
+                    "애드빌정(화이자)",
+                    "탁센연질캡슐(GC녹십자)",
+                ],
+            },
         ],
     },
     "P1": {
@@ -344,8 +391,41 @@ WADA_CODE_ALTERNATIVES: Dict[str, Dict[str, object]] = {
             "알레르기·콧물 참고(허용 성분): 2세대 항히스타민제(세티리진, 로라타딘, 펙소페나딘)",
             "전문의 처방약(트라마돌·스테로이드 등)일 경우 임의 대체 불가 — 전문의 처방 변경 상담 및 필요 시 TUE 신청 필수",
         ],
+        "otc_examples": [
+            {
+                "label": "S6(감기·코막힘)",
+                "ingredients": ["아세트아미노펜", "세티리진", "로라타딘"],
+                "products": [
+                    "타이레놀정 500mg(한국얀센)",
+                    "지르텍정(한국유씨비)",
+                    "클라리틴정(바이엘)",
+                ],
+            },
+            {
+                "label": "S7/S9(통증·소염)",
+                "ingredients": ["이부프로펜", "덱시부프로펜", "나프록센"],
+                "products": [
+                    "애드빌정(화이자)",
+                    "탁센연질캡슐(GC녹십자)",
+                ],
+            },
+        ],
     },
 }
+
+
+def get_otc_examples(wada_code: str | None) -> list[dict[str, object]]:
+    """Return OTC product examples only for eligible In-Competition codes (S6/S7/S9), disabled for S1~S5."""
+    if not wada_code:
+        return []
+    normalized = wada_code.strip().upper()
+    entry = WADA_CODE_ALTERNATIVES.get(normalized)
+    if entry is None:
+        base = normalized.split(".", 1)[0]
+        entry = WADA_CODE_ALTERNATIVES.get(base)
+    if not entry:
+        return []
+    return list(entry.get("otc_examples", []))
 
 
 def resolve_wada_alternative_entry(wada_code: str | None, final_class: str) -> tuple[str, Dict[str, object]]:

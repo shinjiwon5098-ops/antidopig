@@ -16,8 +16,10 @@ from src.config import (
     DISCLAIMER_TEXT,
     EMPTY_INPUT_WARNING,
     HIGH_RISK_CONSERVATIVE_THRESHOLD,
+    OTC_RECOMMENDATION_NOTICE,
     SAMPLES_DIR,
     SUPPORTED_FORMATS_TEXT,
+    get_otc_examples,
 )
 from src.dataset import (
     InvalidImageFormatError,
@@ -419,11 +421,20 @@ def _render_initial_alt_card_html() -> str:
 def _render_result_badge_html(result: PredictionResult) -> str:
     badge_styles = {
         "High Risk": ("HIGH RISK · 복용 금지", "#E11D48"),
-        "Caution": ("CAUTION · 주의 / 전문가 확인", "#D97706"),
+        "Caution": ("CAUTION · 경기 기간 중 금지(S6/S9 추정)", "#D97706"),
         "Safe": ("CHECK REQUIRED · 외형 기준 금지성분 미검출 · 추가 확인 필요", "#0284C7"),
     }
     badge_label, signal_color = badge_styles[result.final_class]
     score_pct = result.probabilities[result.raw_class] * 100.0
+
+    low_quality_html = ""
+    if result.low_quality_warning:
+        low_quality_html = (
+            "<div style='margin-bottom:12px;padding:11px 14px;background:#FFFBEB;"
+            "border:1px solid #FDE68A;border-left:4px solid #D97706;"
+            "color:#111111;font-size:0.86rem;font-weight:700;line-height:1.5;'>"
+            f"⚠️ {html.escape(result.low_quality_warning)}</div>"
+        )
 
     escalation_html = ""
     if result.escalated:
@@ -435,6 +446,7 @@ def _render_result_badge_html(result: PredictionResult) -> str:
 
     return (
         "<div style='background:#F5F5F7;border:1px solid #E5E5EA;padding:18px 20px;'>"
+        f"{low_quality_html}"
         "<div style='display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;'>"
         f"<span style='display:inline-block;padding:6px 14px;border-radius:9999px;"
         f"background:{signal_color};color:#FFFFFF;font-size:0.78rem;font-weight:800;"
@@ -505,6 +517,33 @@ def _render_alt_card_html(result: PredictionResult) -> str:
         for item in result.alternatives_list
     )
 
+    otc_examples = get_otc_examples(result.wada_code)
+    otc_section_html = ""
+    if otc_examples:
+        otc_rows = []
+        for entry in otc_examples:
+            group_label = html.escape(str(entry["label"]))
+            ingredients = ", ".join(html.escape(str(x)) for x in entry["ingredients"])
+            products = ", ".join(html.escape(str(p)) for p in entry["products"])
+            otc_rows.append(
+                "<div style='padding:8px 10px;background:#F5F5F7;border-left:3px solid #111111;margin-top:8px;'>"
+                f"<div style='font-size:0.82rem;font-weight:700;color:#111111;'>{group_label}</div>"
+                f"<div style='font-size:0.82rem;color:#39393B;margin-top:3px;'>허용 성분: [{ingredients}]</div>"
+                f"<div style='font-size:0.84rem;font-weight:600;color:#111111;margin-top:3px;'>"
+                f"→ 추천 일반의약품 예시: {products}</div>"
+                "</div>"
+            )
+        otc_section_html = (
+            "<div style='margin-top:10px;padding:12px 14px;background:#FFFFFF;border:1px solid #E5E5EA;'>"
+            "<div style='font-size:0.78rem;font-weight:800;color:#111111;'>"
+            "🏪 약국 구매 가능 대표 일반의약품(OTC) 추천 예시</div>"
+            f"{''.join(otc_rows)}"
+            "</div>"
+            "<div style='margin-top:10px;font-size:0.77rem;color:#52525B;line-height:1.5;'>"
+            f"{html.escape(OTC_RECOMMENDATION_NOTICE)}"
+            "</div>"
+        )
+
     return (
         "<div style='background:#F5F5F7;border:1px solid #E5E5EA;padding:20px;'>"
         "<div style='display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px;'>"
@@ -535,6 +574,7 @@ def _render_alt_card_html(result: PredictionResult) -> str:
         "💊 허용 성분 참고 · 권장 조치</div>"
         f"<ul style='margin:0;padding-left:18px;font-size:0.84rem;line-height:1.55;'>{items_html}</ul>"
         "</div>"
+        f"{otc_section_html}"
         "</div>"
     )
 
@@ -640,6 +680,29 @@ def handle_analyze(
         result.cam_explanation,
         _render_alt_card_html(result),
         result.guide_text,
+    )
+
+
+def handle_sample_and_analyze(
+    sample_key: str,
+) -> Tuple[Optional[dict], Any, str, Optional[str], Any, str, str, Optional[Image.Image], str, str, str]:
+    """Load sample pill into RAM preview and immediately run analysis."""
+    payload, preview_pil, status_text, _, file_reset = handle_sample_select(sample_key)
+    warn_html, badge_html, probs_html, heatmap_pil, cam_desc, alt_card_html, guide_md = handle_analyze(
+        payload
+    )
+    return (
+        payload,
+        preview_pil,
+        status_text,
+        file_reset,
+        warn_html,
+        badge_html,
+        probs_html,
+        heatmap_pil,
+        cam_desc,
+        alt_card_html,
+        guide_md,
     )
 
 
@@ -782,21 +845,28 @@ def build_app() -> gr.Blocks:
             outputs=[memory_state, preview_image, file_status, warning_banner],
         )
 
-        btn_sample_high.click(
-            fn=lambda: handle_sample_select("high_risk"),
-            inputs=[],
-            outputs=[memory_state, preview_image, file_status, warning_banner, file_input],
-        )
-        btn_sample_caution.click(
-            fn=lambda: handle_sample_select("caution"),
-            inputs=[],
-            outputs=[memory_state, preview_image, file_status, warning_banner, file_input],
-        )
-        btn_sample_safe.click(
-            fn=lambda: handle_sample_select("safe"),
-            inputs=[],
-            outputs=[memory_state, preview_image, file_status, warning_banner, file_input],
-        )
+        for btn_sample, sample_key in (
+            (btn_sample_high, "high_risk"),
+            (btn_sample_caution, "caution"),
+            (btn_sample_safe, "safe"),
+        ):
+            btn_sample.click(
+                fn=lambda key=sample_key: handle_sample_and_analyze(key),
+                inputs=[],
+                outputs=[
+                    memory_state,
+                    preview_image,
+                    file_status,
+                    file_input,
+                    warning_banner,
+                    risk_badge,
+                    prob_bars,
+                    gradcam_image,
+                    cam_desc,
+                    alt_rec_card,
+                    guide_md,
+                ],
+            )
 
         analyze_btn.click(
             fn=handle_analyze,
