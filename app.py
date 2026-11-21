@@ -28,8 +28,12 @@ from src.dataset import (
 )
 from src.inference import DopingPredictor, PredictionResult
 
-# Ensure 3 UI sample images exist on startup.
-generate_mvp_pill_dataset()
+# Ensure 3 UI sample images exist on startup without regenerating full training splits.
+if not all(
+    (SAMPLES_DIR / name).exists()
+    for name in ("sample_high_risk.png", "sample_caution.png", "sample_safe.png")
+):
+    generate_mvp_pill_dataset()
 PREDICTOR = DopingPredictor(weights_path=DEFAULT_WEIGHTS_PATH)
 
 SAMPLE_MAP = {
@@ -905,9 +909,12 @@ def build_app() -> gr.Blocks:
 
 if __name__ == "__main__":
     app = build_app()
+    port = int(os.getenv("PORT", os.getenv("GRADIO_SERVER_PORT", "7860")))
+    default_host = "0.0.0.0" if os.getenv("PORT") else "127.0.0.1"
+    server_name = os.getenv("SERVER_NAME", default_host)
     app.launch(
-        server_name="127.0.0.1",
-        server_port=7860,
+        server_name=server_name,
+        server_port=port,
         inbrowser=False,
         css=CUSTOM_CSS,
         theme=gr.themes.Base(primary_hue="neutral", neutral_hue="neutral"),

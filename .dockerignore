@@ -1,0 +1,16 @@
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+scratch/
+pill_images/
+data/*
+!data/samples/
+*.mp4
+*.tar
+.DS_Store
+Thumbs.db
